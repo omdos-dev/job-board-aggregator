@@ -6,7 +6,7 @@ class JobBoardApp {
         this.allJobs = [];
         this.filteredJobs = [];
         this.currentPage = 1;
-        this.perPage = 50;
+        this.perPage = 100;
         this.sortState = { key: null, direction: 'asc' };
 
         this.filterState = {
@@ -150,6 +150,9 @@ class JobBoardApp {
 
             this.allJobs = data;
             this.filteredJobs = data;
+            this.sortState = { key: null, direction: 'asc' };
+            this.sortedJobs = this.applySorting(this.filteredJobs);
+            console.log(`Loaded ${data.length} jobs`);
 
             // Update stats
             const companies = new Set(data.map(j => j.company_slug || j.company)).size;
@@ -451,6 +454,13 @@ class JobBoardApp {
                 (!locationRegex || locationRegex.test(location))
             );
         });
+
+        if (this.sortState.key) {
+            this.sortedJobs = this.applySorting(this.filteredJobs);
+        } else {
+            this.sortedJobs = null;
+        }
+
         this.currentPage = 1;
         this.updateURL();
         this.render();
@@ -491,7 +501,9 @@ class JobBoardApp {
             this.sortState.key = key;
             this.sortState.direction = 'asc';
         }
-
+        this.sortedJobs = this.applySorting(this.filteredJobs);
+        this.currentPage = 1;
+        this.updateURL();
         this.render();
     }
 
@@ -499,9 +511,9 @@ class JobBoardApp {
         if (!this.sortState.key) return jobs;
 
         const { key, direction } = this.sortState;
-        const asc = direction === 'asc';
+        const multiplier = direction === 'asc' ? 1 : -1;
 
-        return [...jobs].sort((a, b) => {
+        return jobs.sort((a, b) => {
             let aVal = a[key] || '';
             let bVal = b[key] || '';
 
@@ -525,9 +537,15 @@ class JobBoardApp {
             aVal = aVal.toString().toLowerCase();
             bVal = bVal.toString().toLowerCase();
 
-            if (aVal < bVal) return asc ? -1 : 1;
-            if (aVal > bVal) return asc ? 1 : -1;
-            return 0;
+
+            const aStartsWithNumber = /^\d/.test(aVal);
+            const bStartsWithNumber = /^\d/.test(bVal);
+
+            if (aStartsWithNumber && !bStartsWithNumber) return 1;
+            if (!aStartsWithNumber && bStartsWithNumber) return -1;
+
+            // return the values in ascending or descending order based on multiplier
+            return aVal < bVal ? -multiplier : aVal > bVal ? multiplier : 0;
         });
     }
 
@@ -552,9 +570,8 @@ class JobBoardApp {
         const tbody = document.getElementById('jobs-body');
 
         // Apply sorting to filtered jobs
-        const sortedJobs = this.applySorting(this.filteredJobs);
-
-        const totalPages = Math.ceil(sortedJobs.length / this.perPage);
+        const displayJobs = this.applySorting(this.filteredJobs);
+        const totalPages = Math.ceil(displayJobs.length / this.perPage);
 
         // Bounds check
         if (this.currentPage > totalPages && totalPages > 0) this.currentPage = 1;
@@ -562,7 +579,7 @@ class JobBoardApp {
 
         const start = (this.currentPage - 1) * this.perPage;
         const end = start + this.perPage;
-        const pageJobs = sortedJobs.slice(start, end);
+        const pageJobs = displayJobs.slice(start, end);
 
         // Clear table
         tbody.innerHTML = '';
@@ -622,6 +639,13 @@ class JobBoardApp {
         if (this.filterState.ats) params.set('ats', this.filterState.ats);
         if (this.filterState.skill_level) params.set('skill_level', this.filterState.skill_level);
         if (this.currentPage > 1) params.set('page', this.currentPage.toString());
+
+
+        if (this.sortState.key) {
+            params.set('sort_key', this.sortState.key);
+            params.set('sort_dir', this.sortState.direction);
+        }
+
 
         const newURL = params.toString()
             ? `${window.location.pathname}?${params.toString()}`
