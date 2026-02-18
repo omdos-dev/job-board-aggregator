@@ -1,6 +1,3 @@
-data/all_jobs.csv
-
-
 # Python cache
 __pycache__/
 *.py[cod]
