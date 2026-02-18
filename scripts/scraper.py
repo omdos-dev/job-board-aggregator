@@ -156,8 +156,7 @@ def fetch_company_jobs_greenhouse(slug):
                 return slug, normalized
 
     except Exception as e:
-        pass
-
+        print(f"Error fetching Greenhouse for {slug}: {e}") 
     return slug, []
 
 
@@ -180,7 +179,8 @@ def fetch_company_jobs_ashby(slug):
 
         if response.status_code == 200:
             data = response.json()
-            jobs = data.get("data", {}).get("jobBoard", {}).get("jobPostings", [])
+            jobs = (data.get("data") or {}).get("jobBoard") or {}
+            jobs = jobs.get("jobPostings") or []
 
             if jobs:
                 normalized = []
@@ -202,7 +202,7 @@ def fetch_company_jobs_ashby(slug):
                     )
                 return slug, normalized
     except Exception as e:
-        pass
+        print(f"Error fetching Ashby for {slug}: {e}")
     return slug, []
 
 
@@ -211,24 +211,42 @@ def fetch_company_jobs_bamboohr(slug):
     https://{slug}.bamboohr.com/careers/list
 
     """
+    url = f"https://{slug}.bamboohr.com/careers/list"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; ATSProbe/1.0)",
+    }
 
     try:
-        url = f"https://{slug}.bamboohr.com/careers/list"
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=30, headers=headers,)
 
         if response.status_code == 200:
+            
+            if "application/json" not in response.headers.get("Content-Type", ""):
+                print(f"Unexpected content type for {slug}: {response.headers.get('Content-Type')}")
+                return slug, []
+            
             data = response.json()
             jobs = data.get("result", [])
 
             if jobs:
                 normalized = []
                 for job in jobs:
+                    
+                    loc = job.get("location") or {}
+                    if isinstance(loc, dict):
+                        city = loc.get("city", "")
+                        state = loc.get("state", "")
+                        location = ", ".join(filter(None, [city, state])) or "Not specified"
+                    else:
+                        location = str(loc) if loc else "Not specified"
+                        
                     normalized.append(
                         {
                             "company": slug,
                             "company_slug": slug,
                             "title": job.get("jobOpeningName"),
-                            "location": job.get("location", "Not specified")[:50],
+                            "location": location[:50],
                             "url": f"https://{slug}.bamboohr.com/careers/view/{job.get('id')}",
                             "is_recruiter": is_recruiter_company(slug),
                             "ats": "BambooHR",
@@ -240,7 +258,7 @@ def fetch_company_jobs_bamboohr(slug):
                     )
                 return slug, normalized
     except Exception as e:
-        pass
+        print(f"Error fetching BambooHR for {slug}: {e}")
     return slug, []
 
 
@@ -275,7 +293,7 @@ def fetch_company_jobs_lever(slug):
                     )
                 return slug, normalized
     except Exception as e:
-        pass
+        print(f"Error fetching Lever for {slug}: {e}")
     return slug, []
 
 
@@ -393,9 +411,28 @@ def fetch_all_jobs(companies, fetcher, platform="ATS"):
     all_jobs = []
     active_companies = {}
     failed = 0
+    
+    MAX_WORKERS = {
+        "bamboohr": 10,
+        "greenhouse": 30,
+        "ashby": 30,
+        "lever": 30,
+        "workday": 30,
+        "icims": 30,
+    }
+    
+    platform_lower = platform.lower()
+    
+    max_workers = MAX_WORKERS.get(platform_lower, 30)
+    
+    session = None
 
-    with ThreadPoolExecutor(max_workers=30) as executor:
-        futures = {executor.submit(fetcher, slug): slug for slug in companies}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+
+        futures = {
+            executor.submit(fetcher, slug): slug
+            for slug in companies
+        }
 
         for i, future in enumerate(as_completed(futures), 1):
             slug, jobs = future.result()
@@ -558,18 +595,49 @@ def save_results(all_companies, active_companies, all_jobs):
     with open(all_jobs_file, "w") as f:
         json.dump(all_jobs, f, indent=2)
     print(f"All jobs: {all_jobs_file} ({len(all_jobs):,} jobs)")
+    
+    # Build slim version for frontend
+    FRONTEND_FIELDS = {
+        'title', 'company', 'location', 'url',
+        'ats', 'skill_level', 'is_recruiter', 'workplaceType'
+    }
+    
+    slim_jobs = [
+        {k: job.get(k) for k in FRONTEND_FIELDS if k in job}
+        for job in all_jobs
+    ]
+    
+    # Pre-sort by company name for better frontend caching
+    slim_jobs.sort(key=lambda x: (x.get('company', '').lower(), x.get('title', '').lower()))
 
-    # Save compressed version for GitHub Pages
-    compressed_file = os.path.join(OUTPUT_DIR, "all_jobs.json.gz")
-    with gzip.open(compressed_file, "wt", encoding="utf-8") as f:
-        json.dump(all_jobs, f)
+    # Remove old chunk files to prevent confusion and save space
+    for old_chunk in os.listdir(OUTPUT_DIR):
+        if old_chunk.startswith("jobs_chunk_") and old_chunk.endswith(".json.gz"):
+            os.remove(os.path.join(OUTPUT_DIR, old_chunk))
 
-    # Check compression ratio
-    original_size = os.path.getsize(all_jobs_file) / (1024 * 1024)
-    compressed_size = os.path.getsize(compressed_file) / (1024 * 1024)
-    print(
-        f"Compressed: {compressed_file} ({compressed_size:.1f}MB, {compressed_size/original_size*100:.1f}% of original)"
-    )
+    # Split into chunks of ~25k for frontend loading (with gzip compression)
+    CHUNK_SIZE = 25_000
+
+    chunks = [slim_jobs[i:i + CHUNK_SIZE] for i in range(0, len(slim_jobs), CHUNK_SIZE)]
+
+    chunk_filenames = []
+    for idx, chunk in enumerate(chunks):
+        chunk_file = os.path.join(OUTPUT_DIR, f"jobs_chunk_{idx}.json.gz")
+        with gzip.open(chunk_file, "wt", encoding="utf-8") as f:
+            json.dump(chunk, f, indent=0)
+        chunk_filenames.append(f"jobs_chunk_{idx}.json.gz")
+        size_mb = os.path.getsize(chunk_file) / (1024 * 1024)
+        print(f"  Chunk {idx}: {len(chunk):,} jobs ({size_mb:.1f}MB)")
+
+    # Manifest so the frontend knows what to load
+    manifest = {
+        "chunks": chunk_filenames,
+        "totalJobs": len(slim_jobs),
+        "last_updated": timestamp,
+    }
+    manifest_file = os.path.join(OUTPUT_DIR, "jobs_manifest.json")
+    with open(manifest_file, "w") as f:
+        json.dump(manifest, f, indent=2)
 
     recruiter_jobs = sum(1 for job in all_jobs if job.get("is_recruiter"))
 
@@ -629,7 +697,7 @@ def main():
     )
 
     (
-        active_bamboohy,
+        active_bamboohr,
         jobs_bamboohr,
     ) = fetch_all_jobs(bamboohr_companies, fetch_company_jobs_bamboohr, "BAMBOOHR")
 
@@ -652,7 +720,7 @@ def main():
     all_active_companies = {
         **active_greenhouse,
         **active_ashby,
-        **active_bamboohy,
+        **active_bamboohr,
         **active_lever,
         **active_workday,
     }
